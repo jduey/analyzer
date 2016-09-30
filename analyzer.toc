@@ -1,0 +1,390 @@
+
+(add-ns grmr (git-dependency "github.com:jduey/grammar.git" "grammar.toc"))
+(add-ns ast (git-dependency "github.com:jduey/ast.git" "ast.toc"))
+(add-ns sm (git-dependency "github.com:jduey/state-maybe.git" "state-maybe.toc"))
+(add-ns fio (git-dependency "github.com:jduey/file-io.git" "file-io.toc"))
+(add-ns sys (git-dependency "github.com:jduey/system.git" "system.toc"))
+
+(def type-counter (int-generator TypeCount))
+
+(defn is-expr [pred]
+  (for [expr (sm/get-val :expr)
+        :when (pred expr)]
+    expr))
+
+(def analyze-expr)
+
+(def analyze-inline-text
+  (for [expr (sm/get-val :expr)
+        [sym type text] (sm/when (and (match expr List 'inline-text)
+                                      (or (and (< 2 (count expr))
+                                               (maybe expr))
+                                          (let [[sym text] expr]
+                                            (maybe (list sym :no-type text))))))]
+    (ast/inline-text text type (.file-name sym) (.line-num sym))))
+
+(def analyze-symbol
+  (for [sym (is-expr grmr/symbol?)]
+    (apply ast/sym (type-args sym))))
+
+(def analyze-keyword
+  (for [kw (is-expr (partial instance? Keyword))]
+    (ast/kw kw)))
+
+(def analyze-number
+  (for [num (is-expr (partial instance? Number))]
+    (ast/number num)))
+
+(def analyze-string
+  (for [str-val (is-expr string?)]
+    (ast/strng str-val)))
+
+(def analyze-call
+  (for [expr (sm/get-val :expr)
+        [target & args] (sm/traverse expr analyze-expr)]
+    (ast/call-expr target args)))
+
+(defn analyze-let-binding [binding-pair]
+  (for [_ (sm/when (= 2 (count binding-pair)))
+        :let [[binding expr] binding-pair]
+        curr-expr (sm/get-val :expr)
+        ast (analyze-expr expr)
+        _ (sm/set-val :expr curr-expr)]
+    (ast/binding binding ast)))
+
+(def analyze-let
+  (for [expr (sm/get-val :expr)
+        [_ bindings & exprs] (sm/when (match expr List 'let _ _))
+        bindings (sm/traverse bindings analyze-let-binding)
+        body (sm/traverse exprs analyze-expr)]
+    (ast/let-expr bindings body)))
+
+(def analyze-fn-arity
+  (for [expr (sm/get-val :expr)
+        [_ args exprs] (sm/when (match expr List 'fn-arity _ _))
+        body (sm/traverse exprs analyze-expr)]
+    (ast/fn-arity args body)))
+
+;; TODO: let anonymous function closures reference themselves by name
+(def analyze-fn
+  (for [expr (sm/get-val :expr)
+        [_ name arities] (sm/when (match expr List 'fn _ _))
+        arities (sm/traverse arities analyze-expr)]
+    (ast/fn-expr (apply ast/sym (type-args name)) arities)))
+
+(defn analyze-proto-arity [[fn-name params & default-body]]
+  (flat-map (sm/when-not (some params (partial = "&")))
+            (fn [_]
+              (comp (for [_ (sm/when (list-empty? default-body))]
+                      {fn-name {(dec (count params)) {}}})
+                    (for [ast (analyze-expr (list 'fn-arity (rest params) default-body))]
+                      {fn-name {(dec (count params)) {:default ast}}})))))
+
+(def analyze-protocol
+  (for [expr (sm/get-val :expr)
+        [_ name & defs] (sm/when (match expr List 'defprotocol _ _))
+        proto-fns (sm/traverse defs analyze-proto-arity)]
+    (ast/proto name (apply merge-with comp proto-fns))))
+
+(defn make-quoted [quoted-form]
+  (comp (sm/when (for [_ (grmr/symbol? quoted-form)]
+                   (ast/quoted quoted-form)))
+        (for [_ (sm/when (or (instance? String quoted-form)
+                             (instance? Number quoted-form)
+                             (instance? Keyword quoted-form)))
+              ast (analyze-expr quoted-form)]
+          ast)
+        (for [[coll-builder & frms] (sm/when (or (match quoted-form List 'hash-map _)
+                                                 (match quoted-form List 'vector _)))
+              contents (sm/traverse frms make-quoted)]
+          (ast/call-expr (apply ast/sym (type-args coll-builder)) contents))
+        (for [[_ quoted-value] (sm/when (match quoted-form List 'quote _))
+              ast (make-quoted quoted-value)]
+          ast)
+        (for [_ (sm/when (instance? List quoted-form))
+              qs (sm/traverse quoted-form make-quoted)]
+          (ast/call-expr (ast/sym 'list) qs))))
+
+(def analyze-quoted
+  (for [expr (sm/get-val :expr)
+        [_ to-be-quoted] (sm/when (match expr List 'quote _))
+        quoted (make-quoted to-be-quoted)]
+    quoted))
+
+(def analyze-def
+  (flat-map (sm/get-val :expr)
+            (fn [expr]
+              (comp (for [[_ name value] (sm/when (match expr List 'def _ _))
+                          val-ast (analyze-expr value)]
+                      (ast/def-expr name val-ast))
+                    (for [[_ name] (sm/when (match expr List 'def _))]
+                      (ast/declare name))))))
+
+(def analyze-proto-fn
+  (for [expr (sm/get-val :expr)
+        [name args exprs frms] (sm/when (for [[frm & frms] (match expr List _)
+                                              [name args & exprs] (match frm List _ _)]
+                                          (list name args exprs frms)))
+        body (sm/traverse exprs analyze-expr)
+        _ (sm/set-val :expr frms)]
+    {name (list (ast/fn-arity (rest args) body))}))
+
+(def analyze-proto-impl
+  (for [expr (sm/get-val :expr)
+        [name & frms] (sm/when (match expr List _ _))
+        _ (sm/set-val :expr frms)
+        fn-impls (sm/recur analyze-proto-fn)]
+    {name (apply merge-with comp fn-impls)}))
+
+(defn analyze-extensions [exts]
+  (for [curr-expr (sm/get-val :expr)
+        _ (sm/set-val :expr exts)
+        proto-impls (sm/recur analyze-proto-impl)
+        _ (sm/set-val :expr curr-expr)]
+    (apply merge-with comp proto-impls)))
+
+(def analyze-extend-type
+  (for [expr (sm/get-val :expr)
+        [_ name & defs] (sm/when (match expr List 'extend-type _ _))
+        proto-specs (analyze-extensions defs)]
+    (ast/type-extension (ast/symbol-ast (.ns name) (.base name) (.file-name name) (.line-num name))
+                        proto-specs)))
+
+(def analyze-reify
+  (for [expr (sm/get-val :expr)
+        [_ & defs] (sm/when (match expr List 'reify))
+        proto-specs (analyze-extensions defs)]
+    (ast/reified (extract type-counter) proto-specs)))
+
+(defn tagged-sym [sym file-name line-num]
+  (grmr/tagged-symbol "" sym sym file-name line-num))
+
+(defn constructor-expr [new-type-name type-val-sym fields]
+  (let [fn (.file-name new-type-name)
+        ln (.line-num new-type-name)]
+    (analyze-expr (list 'def new-type-name
+                        (list 'reify
+                              (tagged-sym 'Getter fn ln)
+                              (list (tagged-sym 'type-name fn ln)
+                                    (list 'vector 'x)
+                                    (str "*" new-type-name " constructor*"))
+                              (tagged-sym 'Stringable fn ln)
+                              (list (tagged-sym 'string-list fn ln)
+                                    (list 'vector '_)
+                                    (list 'list "<TypeCon " (str new-type-name) " ["
+                                          (list-to-str (interpose fields ", ")) "]>"))
+                              (tagged-sym 'Type fn ln)
+                              (list (tagged-sym 'instance? fn ln)
+                                    (list 'vector 'x 'v)
+                                    (list '=* (list 'get-type type-val-sym) '(get-type v)))
+                              (tagged-sym 'Container fn ln)
+                              (list (tagged-sym 'apply* fn ln)
+                                    (list 'vector '_ 'args)
+                                    (list 'apply 'invoke '_ 'args))
+                              (tagged-sym 'Function fn ln)
+                              (list (tagged-sym 'invoke fn ln)
+                                    (list* 'vector '_ fields)
+                                    (list 'new-type-value type-val-sym
+                                          (cons 'list fields))))))))
+
+(defn build-impls [fields impls]
+  (extract (or (and (list-empty? fields) (maybe impls))
+               (every impls
+                      (fn [impl]
+                        (or (for [_ (and (instance? List impl)
+                                         (< 2 (count impl)))
+                                  :let [[fn-name args & body] impl
+                                        args-map (reduce args {}
+                                                         (fn [m arg]
+                                                           (assoc m arg '_)))]
+                                  fields (every fields
+                                                (fn [fld]
+                                                  (or (get args-map fld)
+                                                      (maybe fld))))
+                                  arg (second args)]
+                              (list fn-name args
+                                    (list* 'let (list (list (comp fields (list :dont-care))
+                                                            (list 'type-args arg)))
+                                           body)))
+                            (maybe impl)))))))
+
+(defn impls-expr [impls-sym impls]
+  (let [fn (.file-name impls-sym)
+        ln (.line-num impls-sym)]
+    (list 'def impls-sym
+          (list*
+           'reify
+           (tagged-sym 'Eq fn ln)
+           (list (tagged-sym '=* fn ln)
+                 (list 'vector 'x 'y)
+                 '(and (=* (get-type x) (get-type y))
+                       (=* (type-args x) (type-args y))))
+           (tagged-sym 'Associative fn ln)
+           (list (tagged-sym 'get fn ln)
+                 (list 'vector 'x 'field)
+                 '(maybe (field x)))
+           (list (tagged-sym 'assoc fn ln)
+                 (list 'vector 'x 'field 'new-value)
+                 '(field x new-value))
+           impls))))
+
+(defn create-getters [name fields fn ln]
+  (comp* (list (tagged-sym 'Getter fn ln)
+               (list (tagged-sym 'type-name fn ln) (list '_ '_)
+                     (str name)))
+         (for [field fields]
+           (let [getter-sym (tagged-sym (symbol (str "." field)) fn ln)]
+             (list (list getter-sym (list '_ 'x)
+                         field)
+                   (let [new-value (symbol (str "new-" field))]
+                     (list getter-sym (list '_ 'x new-value)
+                           (list 'let
+                                 (list (list field new-value))
+                                 (cons name fields)))))))))
+
+(def analyze-deftype
+  (for [expr (sm/get-val :expr)
+        [_ name fields & defs] (sm/when (match expr List 'deftype _ _))
+        :let [fields (rest fields)
+              fn (.file-name name)
+              ln (.line-num name)
+              type-val-sym (tagged-sym (gensym "type-val-") fn ln)
+              field-getters (create-getters name fields fn ln)]
+        impls-ast (analyze-expr (impls-expr type-val-sym
+                                            (build-impls fields
+                                                         (comp field-getters defs))))]
+    (ast/type-expr name type-val-sym fields
+                   (constructor-expr name type-val-sym fields)
+                   impls-ast)))
+
+(def analyze-add-ns
+  (for [expr (sm/get-val :expr)
+        [_ ns-name module] (sm/when (match expr List 'add-ns _ _))
+        asts (analyze-expr module)]
+    (ast/ns-add ns-name asts)))
+
+;; TODO: find a better name. Too tired
+(defn import-module [module-name]
+  (comp (for [_ (sm/get-in-val (list :modules module-name))]
+          (list (ast/strng module-name)))
+        (for [text (sm/get-val :text)
+              input (sm/get-val :input)
+              file-name (sm/get-val :file-name)
+              line-num (sm/get-val :line-num)
+              _ (sm/set-val :file-name module-name)
+              _ (sm/set-val :line-num 1)
+              _ (sm/set-val :text "")
+              file-input-stream (sm/when (or (fio/file-in module-name)
+                                             (maybe (let [_ (print-err "Could not open module:" module-name)]
+                                                      (abort)))))
+              _ (sm/set-val :input (cache file-input-stream))
+              parser (sm/get-val :parser)
+              asts (sm/recur (for [expr parser
+                                   ast (analyze-expr expr)]
+                               ast))
+              _ (sm/assoc-in-val (list :modules module-name) asts)
+              _ (sm/set-val :text text)
+              _ (sm/set-val :input input)
+              _ (sm/set-val :file-name file-name)
+              _ (sm/set-val :line-num line-num)]
+          (cons (ast/strng module-name) asts))
+        (map (sm/state-maybe "")
+             (fn [_]
+               (print-err "Could not analyze module/dependency:" module-name)
+               (abort)))))
+
+(def analyze-module
+  (for [expr (sm/get-val :expr)
+        [_ module-name] (sm/when (match expr List 'module _))
+        ;; TODO: prepend :current-directory to module-name
+        asts (import-module module-name)]
+    asts))
+
+
+(def analyze-git-dep
+  (for [expr (sm/get-val :expr)
+        [_ repo file & args] (sm/when (match expr List 'git-dependency _ _))
+        file-name (sm/get-val :file-name)
+        line-num (sm/get-val :line-num)
+        _ (sm/when (or (empty? (filter (seq file) (partial = "/")))
+                       (let [_ (print-err "For git dependencies,"
+                                          "files may only be imported from root of repository"
+                                          ":" file-name line-num)]
+                         (abort))
+                       (maybe "")))
+        :let [opts (apply hash-map args)]
+        checkout (sm/when (or (get opts :tag)
+                              (get opts :sha)
+                              (get opts :branch)
+                              (maybe "master")))
+        proj-dir (sm/get-val :project-directory)
+        :let [dep-path (str proj-dir "/dependencies/git/" repo "/" checkout)]
+        _ (sm/when (or (sys/access (str dep-path "/" file))
+                       (and (sys/access dep-path)
+                            (let [_ (print-err "Dependency file" file "missing from repository"
+                                               repo ":" file-name line-num)]
+                              (abort)))
+                       (sys/sh-proc "/usr/bin/git" (list "clone" "-b" checkout (str "git@" repo) dep-path))))
+        _ (sm/when (or (sys/access (str dep-path "/" file))
+                       (let [_ (print-err "Dependency file" file "missing from repository"
+                                          repo ":" file-name line-num)]
+                         (abort))))
+        ;; TODO: change to repo directory
+        module-ast (import-module (str dep-path "/" file))]
+    module-ast))
+
+(def analyze-main
+  (for [expr (sm/get-val :expr)
+        [_ args & exprs] (sm/when (match expr List 'main _ _))
+        body (sm/traverse exprs analyze-expr)]
+    (ast/main-fn args body)))
+
+(def analyze-or
+  (for [expr (sm/get-val :expr)
+        [_ & exprs] (sm/when (match expr List 'or))
+        clauses (sm/traverse exprs analyze-expr)
+        ast (sm/when (or (and (= 1 (count clauses))
+                              (first clauses))
+                         (maybe (ast/or-expr clauses))))]
+    ast))
+
+(def analyze-and
+  (for [expr (sm/get-val :expr)
+        [_ & exprs] (sm/when (match expr List 'and))
+        clauses (sm/traverse exprs analyze-expr)
+        ast (sm/when (or (and (= 1 (count clauses))
+                              (first clauses))
+                         (maybe (ast/and-expr clauses))))]
+    ast))
+
+(def expr-to-ast
+  (comp analyze-symbol
+        analyze-keyword
+        analyze-number
+        analyze-string
+        analyze-fn
+        analyze-deftype
+        analyze-protocol
+        analyze-or
+        analyze-and
+        analyze-main
+        analyze-def
+        analyze-extend-type
+        analyze-reify
+        analyze-module
+        analyze-git-dep
+        analyze-add-ns
+        analyze-inline-text
+        analyze-fn-arity
+        analyze-let
+        analyze-quoted
+        analyze-call
+        (flat-map (sm/get-val :expr)
+                  (fn [e]
+                    (print-err "could not analyze" e)
+                    empty-list))))
+
+(defn analyze-expr [expr]
+  (for [_ (sm/set-val :expr expr)
+        ast expr-to-ast]
+    ast))
