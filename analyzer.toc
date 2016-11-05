@@ -36,7 +36,7 @@
     (ast/number num)))
 
 (def analyze-string
-  (for [str-val (is-expr string?)]
+  (for [str-val (is-expr (partial instance? String))]
     (ast/strng str-val)))
 
 (def analyze-call
