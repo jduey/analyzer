@@ -23,21 +23,38 @@
                                             (maybe (list sym :no-type text))))))]
     (ast/inline-text text type (.file-name sym) (.line-num sym))))
 
-(def analyze-symbol
-  (for [sym (is-expr grmr/symbol?)]
-    (apply ast/sym (type-args sym))))
+(defprotocol AnalyzeLiteral
+  (analyze-literal-value [v]
+    (zero sm/state-maybe)))
 
-(def analyze-keyword
-  (for [kw (is-expr (partial instance? Keyword))]
-    (ast/kw kw)))
+(extend-type Symbol
+  AnalyzeLiteral
+  (analyze-literal-value [sym]
+    (sm/state-maybe (ast/sym sym))))
 
-(def analyze-number
-  (for [num (is-expr (partial instance? Number))]
-    (ast/number num)))
+(extend-type grmr/tagged-symbol
+  AnalyzeLiteral
+  (analyze-literal-value [sym]
+    (sm/state-maybe (ast/sym sym))))
 
-(def analyze-string
-  (for [str-val (is-expr (partial instance? String))]
-    (ast/strng str-val)))
+(def analyze-literal
+  (flat-map (sm/get-val :expr)
+            analyze-literal-value))
+
+(extend-type Keyword
+  AnalyzeLiteral
+  (analyze-literal-value [kw]
+    (sm/state-maybe (ast/kw kw))))
+
+(extend-type Number
+  AnalyzeLiteral
+  (analyze-literal-value [num]
+    (sm/state-maybe (ast/number num))))
+
+(extend-type String
+  AnalyzeLiteral
+  (analyze-literal-value [str-val]
+    (sm/state-maybe (ast/strng str-val))))
 
 (def analyze-call
   (for [expr (sm/get-val :expr)
@@ -70,7 +87,7 @@
   (for [expr (sm/get-val :expr)
         [_ name arities] (sm/when (match expr List 'fn _ _))
         arities (sm/traverse arities analyze-expr)]
-    (ast/fn-expr (apply ast/sym (type-args name)) arities)))
+    (ast/fn-expr (ast/sym name) arities)))
 
 (defn analyze-proto-arity [[fn-name params & default-body]]
   (flat-map (sm/when-not (some params (partial = "&")))
@@ -86,29 +103,52 @@
         proto-fns (sm/traverse defs analyze-proto-arity)]
     (ast/proto name (apply merge-with comp proto-fns))))
 
-(defn make-quoted [quoted-form]
-  (comp (sm/when (for [_ (grmr/symbol? quoted-form)]
-                   (ast/quoted quoted-form)))
-        (for [_ (sm/when (or (instance? String quoted-form)
-                             (instance? Number quoted-form)
-                             (instance? Keyword quoted-form)))
-              ast (analyze-expr quoted-form)]
-          ast)
-        (for [[coll-builder & frms] (sm/when (or (match quoted-form List 'hash-map _)
-                                                 (match quoted-form List 'vector _)))
-              contents (sm/traverse frms make-quoted)]
-          (ast/call-expr (apply ast/sym (type-args coll-builder)) contents))
-        (for [[_ quoted-value] (sm/when (match quoted-form List 'quote _))
-              ast (make-quoted quoted-value)]
-          ast)
-        (for [_ (sm/when (instance? List quoted-form))
-              qs (sm/traverse quoted-form make-quoted)]
-          (ast/call-expr (ast/sym 'list) qs))))
+(defprotocol QuoteLiteral
+  (quote-literal [quoted-sym]
+    (zero sm/state-maybe)))
+
+(extend-type String
+  QuoteLiteral
+  (quote-literal [string]
+    (sm/state-maybe (analyze-expr string))))
+
+(extend-type Number
+  QuoteLiteral
+  (quote-literal [num]
+    (sm/state-maybe (analyze-expr num))))
+
+(extend-type Keyword
+  QuoteLiteral
+  (quote-literal [kw]
+    (sm/state-maybe (analyze-expr kw))))
+
+(extend-type Symbol
+  QuoteLiteral
+  (quote-literal [sym]
+    (sm/state-maybe (ast/quoted sym))))
+
+(extend-type grmr/tagged-symbol
+  QuoteLiteral
+  (quote-literal [sym]
+    (sm/state-maybe (ast/quoted sym))))
+
+(extend-type List
+  QuoteLiteral
+  (quote-literal [quoted-list]
+    (comp (for [[_ quoted-value] (sm/when (match quoted-list List 'quote _))
+                ast (quote-literal quoted-value)]
+            ast)
+          (for [[coll-builder & frms] (sm/when (or (match quoted-list List 'hash-map _)
+                                                   (match quoted-list List 'vector _)))
+                contents (sm/traverse frms quote-literal)]
+            (ast/call-expr (ast/sym coll-builder) contents))
+          (for [qs (sm/traverse quoted-list quote-literal)]
+            (ast/call-expr (ast/sym 'list) qs)))))
 
 (def analyze-quoted
   (for [expr (sm/get-val :expr)
         [_ to-be-quoted] (sm/when (match expr List 'quote _))
-        quoted (make-quoted to-be-quoted)]
+        quoted (quote-literal to-be-quoted)]
     quoted))
 
 (def analyze-def
@@ -147,8 +187,7 @@
   (for [expr (sm/get-val :expr)
         [_ name & defs] (sm/when (match expr List 'extend-type _ _))
         proto-specs (analyze-extensions defs)]
-    (ast/type-extension (ast/symbol-ast (.ns name) (.base name) (.file-name name) (.line-num name))
-                        proto-specs)))
+    (ast/type-extension (.v (ast/sym name)) proto-specs)))
 
 (def analyze-reify
   (for [expr (sm/get-val :expr)
@@ -191,10 +230,8 @@
   (extract (or (and (list-empty? fields) (maybe impls))
                (every impls
                       (fn [impl]
-                        (or (for [_ (and (instance? List impl)
-                                         (< 2 (count impl)))
-                                  :let [[fn-name args & body] impl
-                                        args-map (reduce args {}
+                        (or (for [[fn-name args expr & exprs] (match impl List _ _ _)
+                                  :let [args-map (reduce args {}
                                                          (fn [m arg]
                                                            (assoc m arg '_)))]
                                   fields (every fields
@@ -205,7 +242,7 @@
                               (list fn-name args
                                     (list* 'let (list (list (comp fields (list :dont-care))
                                                             (list 'type-args arg)))
-                                           body)))
+                                           (cons expr exprs))))
                             (maybe impl)))))))
 
 (defn impls-expr [impls-sym impls]
@@ -358,10 +395,7 @@
     ast))
 
 (def expr-to-ast
-  (comp analyze-symbol
-        analyze-keyword
-        analyze-number
-        analyze-string
+  (comp analyze-literal
         analyze-fn
         analyze-deftype
         analyze-protocol
