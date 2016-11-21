@@ -294,12 +294,6 @@
                    (constructor-expr name type-val-sym fields)
                    impls-ast)))
 
-(def analyze-add-ns
-  (for [expr (sm/get-val :expr)
-        [_ ns-name module] (sm/when (match expr List 'add-ns _ _))
-        asts (analyze-expr module)]
-    (ast/ns-add ns-name asts)))
-
 ;; TODO: find a better name. Too tired
 (defn import-module [module-name]
   (comp (for [_ (sm/get-in-val (list :modules module-name))]
@@ -340,7 +334,10 @@
 
 (def analyze-git-dep
   (for [expr (sm/get-val :expr)
+        _ (sm/when (match expr List 'git-dependency))
+        :let [_ (print-err :test1)]
         [_ repo file & args] (sm/when (match expr List 'git-dependency _ _))
+        :let [_ (print-err :test2)]
         file-name (sm/get-val :file-name)
         line-num (sm/get-val :line-num)
         _ (sm/when (or (empty? (filter (seq file) (partial = "/")))
@@ -369,6 +366,15 @@
         ;; TODO: change to repo directory
         module-ast (import-module (str dep-path "/" file))]
     module-ast))
+
+(def analyze-add-ns
+  (for [expr (sm/get-val :expr)
+        [_ ns-name module] (sm/when (match expr List 'add-ns _ _))
+        _ (sm/set-val :expr module)
+        asts (comp analyze-module
+                   analyze-git-dep)
+        _ (sm/set-val :expr expr)]
+    (ast/ns-add ns-name asts)))
 
 (def analyze-main
   (for [expr (sm/get-val :expr)
