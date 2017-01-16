@@ -1,9 +1,6 @@
 
 (add-ns grmr (git-dependency "github.com:jduey/grammar.git" "grammar.toc"))
 (add-ns ast (git-dependency "github.com:jduey/ast.git" "ast.toc"))
-(add-ns sm (git-dependency "github.com:jduey/state-maybe.git" "state-maybe.toc"))
-(add-ns fio (git-dependency "github.com:jduey/file-io.git" "file-io.toc"))
-(add-ns sys (git-dependency "github.com:jduey/system.git" "system.toc"))
 
 (def type-counter (int-generator TypeCount))
 
