@@ -1,4 +1,6 @@
 
+;; Explicitly passing 'config' around rather than using Reader for perfomance reasons
+
 (add-ns grmr (git-dependency "github.com:jduey/grammar.git" "grammar.toc"))
 (add-ns ast (git-dependency "github.com:jduey/ast.git" "ast.toc"))
 
@@ -42,47 +44,47 @@
   (analyze-literal-value [str-val]
     (maybe (ast/strng str-val))))
 
-(defn analyze-call [expr]
-  (for [[target & args] (traverse expr maybe analyze-expr)]
+(defn analyze-call [config expr]
+  (for [[target & args] (traverse expr maybe (partial analyze-expr config))]
     (ast/call-expr target args)))
 
-(defn analyze-let-binding [binding-pair]
+(defn analyze-let-binding [config binding-pair]
   (for [_ (= 2 (count binding-pair))
         ;; TODO: can use 'match' here
         :let [[binding expr] binding-pair]
-        ast (analyze-expr expr)]
+        ast (analyze-expr config expr)]
     (ast/binding binding ast)))
 
-(defn analyze-let [expr]
+(defn analyze-let [config expr]
   (for [[_ bindings & exprs] (match expr List 'let _ _)
-        bindings (traverse bindings maybe analyze-let-binding)
-        body (traverse exprs maybe analyze-expr)]
+        bindings (traverse bindings maybe (partial analyze-let-binding config))
+        body (traverse exprs maybe (partial analyze-expr config))]
     (ast/let-expr bindings body)))
 
-(defn analyze-fn-arity [expr]
+(defn analyze-fn-arity [config expr]
   (for [[_ args exprs] (match expr List 'fn-arity _ _)
-        body (traverse exprs maybe analyze-expr)]
+        body (traverse exprs maybe (partial analyze-expr config))]
     (ast/fn-arity args body)))
 
 ;; TODO: let anonymous function closures reference themselves by name
-(defn analyze-fn [expr]
+(defn analyze-fn [config expr]
   (for [[_ name arities] (match expr List 'fn _ _)
-        arities (traverse arities maybe analyze-expr)]
+        arities (traverse arities maybe (partial analyze-expr config))]
     (ast/fn-expr (ast/sym name) arities)))
 
-(defn analyze-proto-arity [[fn-name params & default-body]]
+(defn analyze-proto-arity [config [fn-name params & default-body]]
   (or (and (some params (partial = "&"))
            (maybe (let [_ (print-err "Variadic args not allowed for protocol functions at "
                                      (.file-name fn-name) ": " (.line-num fn-name))]
                     (abort))))
       (or (for [_ (empty? default-body)]
             {fn-name {(dec (count params)) {}}})
-          (for [ast (analyze-expr (list 'fn-arity (rest params) default-body))]
+          (for [ast (analyze-expr config (list 'fn-arity (rest params) default-body))]
             {fn-name {(dec (count params)) {:default ast}}}))))
 
-(defn analyze-protocol [expr]
+(defn analyze-protocol [config expr]
   (for [[_ name & defs] (match expr List 'defprotocol _ _)
-        proto-fns (traverse defs maybe analyze-proto-arity)]
+        proto-fns (traverse defs maybe (partial analyze-proto-arity config))]
     (ast/proto name (apply merge-with comp proto-fns))))
 
 (defprotocol QuoteLiteral
@@ -117,14 +119,14 @@
         quoted (quote-literal to-be-quoted)]
     quoted))
 
-(defn analyze-def [expr]
+(defn analyze-def [config expr]
   (comp (for [[_ name value] (match expr List 'def _ _)
-              val-ast (analyze-expr value)]
+              val-ast (analyze-expr config value)]
           (ast/def-expr name val-ast))
         (for [[_ name] (match expr List 'def _)]
           (ast/declare name))))
 
-(defn analyze-extensions [protocol-name exts]
+(defn analyze-extensions [config protocol-name exts]
   (reduce exts (maybe [protocol-name {}])
           (fn [result expr]
             (flat-map result
@@ -135,7 +137,7 @@
                                    (fn [_]
                                      [expr (assoc extensions expr {})]))
                               (for [[fn-name args & body] (match expr List _ _)
-                                    body (traverse body maybe analyze-expr)
+                                    body (traverse body maybe (partial analyze-expr config))
                                     extensions (or (map (get-in extensions [protocol-name fn-name])
                                                         (fn [fn-impls]
                                                           (assoc-in extensions [protocol-name fn-name]
@@ -150,18 +152,18 @@
                                                                     (list (ast/fn-arity (rest args) body)))))]
                                 [protocol-name extensions]))))))))
 
-(defn analyze-extend-type [expr]
+(defn analyze-extend-type [config expr]
   (for [[_ type-name & exts] (match expr List 'extend-type _ _ _)
         protocol-name (first exts)
         :when (or (instance? Symbol protocol-name)
                   (instance? grmr/tagged-symbol protocol-name))
-        [_ type-extensions] (analyze-extensions protocol-name exts)]
+        [_ type-extensions] (analyze-extensions config protocol-name exts)]
     (ast/type-extension (.v (ast/sym type-name)) type-extensions)))
 
-(defn analyze-reify [expr]
+(defn analyze-reify [config expr]
   (for [[_ & defs] (match expr List 'reify)
         proto-name (first defs)
-        [_ proto-specs] (analyze-extensions proto-name defs)]
+        [_ proto-specs] (analyze-extensions config proto-name defs)]
     (ast/reified (extract type-counter) proto-specs)))
 
 (defn tagged-sym [sym file-name line-num]
@@ -247,16 +249,16 @@
                                  (list (list field new-value))
                                  (cons name fields)))))))))
 
-(defn analyze-deftype [expr]
+(defn analyze-deftype [config expr]
   (for [[_ name fields & defs] (match expr List 'deftype _ _)
         :let [fields (rest fields)
               fn (.file-name name)
               ln (.line-num name)
               type-val-sym (tagged-sym (gensym "type-val-") fn ln)
               field-getters (create-getters name fields fn ln)]
-        constructor (analyze-expr (constructor-expr name type-val-sym fields))
+        constructor (analyze-expr config (constructor-expr name type-val-sym fields))
         impls (build-impls fields (comp field-getters defs))
-        impls-ast (analyze-expr (impls-expr type-val-sym impls))]
+        impls-ast (analyze-expr config (impls-expr type-val-sym impls))]
   (ast/type-expr name type-val-sym fields constructor impls-ast)))
 
 (defn analyze-module [expr]
@@ -275,43 +277,43 @@
                    (analyze-git-dep module))]
     (ast/ns-add ns-name ns-ast)))
 
-(defn analyze-main [expr]
+(defn analyze-main [config expr]
   (for [[_ args & exprs] (match expr List 'main _ _)
-        body (traverse exprs maybe analyze-expr)]
+        body (traverse exprs maybe (partial analyze-expr config))]
     (ast/main-fn args body)))
 
-(defn analyze-or [expr]
+(defn analyze-or [config expr]
   (for [[_ & exprs] (match expr List 'or)
-        clauses (traverse exprs maybe analyze-expr)
+        clauses (traverse exprs maybe (partial analyze-expr config))
         ast (or (and (= 1 (count clauses))
                      (first clauses))
                 (maybe (ast/or-expr clauses)))]
     ast))
 
-(defn analyze-and [expr]
+(defn analyze-and [config expr]
   (for [[_ & exprs] (match expr List 'and)
-        clauses (traverse exprs maybe analyze-expr)
+        clauses (traverse exprs maybe (partial analyze-expr config))
         ast (or (and (= 1 (count clauses))
                      (first clauses))
                 (maybe (ast/and-expr clauses)))]
     ast))
 
-(defn analyze-expr [expr]
+(defn analyze-expr [config expr]
   (or (analyze-literal-value expr)
       (inline-text-expr expr)
       (analyze-quoted expr)
       (analyze-add-ns expr)
-      (analyze-fn expr)
-      (analyze-deftype expr)
-      (analyze-protocol expr)
-      (analyze-or expr)
-      (analyze-and expr)
-      (analyze-main expr)
-      (analyze-def expr)
-      (analyze-extend-type expr)
-      (analyze-reify expr)
-      (analyze-fn-arity expr)
-      (analyze-let expr)
-      (analyze-call expr)
+      (analyze-fn config expr)
+      (analyze-deftype config expr)
+      (analyze-protocol config expr)
+      (analyze-or config expr)
+      (analyze-and config expr)
+      (analyze-main config expr)
+      (analyze-def config expr)
+      (analyze-extend-type config expr)
+      (analyze-reify config expr)
+      (analyze-fn-arity config expr)
+      (analyze-let config expr)
+      (analyze-call config expr)
       (let [_ (print-err "Could not analyze " expr)]
         (maybe (abort)))))
