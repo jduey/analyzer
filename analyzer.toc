@@ -8,12 +8,12 @@
 
 (def analyze-expr)
 
-(defn inline-text-expr [expr]
-  (for [[sym type text] (and (match expr List 'inline-text)
+(defn inline-C-expr [expr]
+  (for [[sym type text] (and (match expr List 'inline-C)
                              (or (and (< 2 (count expr)) (maybe expr))
                                  (let [[sym text] expr]
                                    (maybe [sym :no-type text]))))]
-    (ast/inline-text text type (.file-name sym) (.line-num sym))))
+    (ast/inline-C text type (.file-name sym) (.line-num sym))))
 
 (defprotocol AnalyzeLiteral
   (analyze-literal-value [v]
@@ -300,7 +300,7 @@
 
 (defn analyze-expr [config expr]
   (or (analyze-literal-value expr)
-      (inline-text-expr expr)
+      (inline-C-expr expr)
       (analyze-quoted expr)
       (analyze-add-ns expr)
       (analyze-fn config expr)
