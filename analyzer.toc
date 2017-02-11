@@ -299,89 +299,64 @@
                 (maybe (ast/and-expr clauses)))]
     ast))
 
-(defn for-let [config binding value expr-ast]
-  (and (= :let binding)
-       (for [bindings (traverse (partition (rest value) 2) maybe
-                                (partial analyze-let-binding config))]
-         (ast/let-expr bindings (list expr-ast)))))
+(defn make-for-binding [binding value]
+  (list :binding (fn [wrap-sym expr]
+                   (list (tagged-sym 'flat-map (ast/file-name value) (ast/line-number value))
+                         value
+                         (list 'fn 'anon
+                               (list (list 'fn-arity (list binding)
+                                           (list expr))))))))
 
-(defn for-when [config binding value expr-ast wrapper-sym]
-  (and (= :when binding)
-       (map (analyze-expr config value)
-            (fn [clause-ast]
-              (ast/call-expr (ast/sym (tagged-sym 'extract
-                                                  (ast/file-name clause-ast)
-                                                  (ast/line-number clause-ast)))
-                             (list (ast/or-expr
-                                    [(ast/and-expr
-                                      [clause-ast
-                                       (ast/call-expr (ast/sym (tagged-sym 'maybe
-                                                                           (ast/file-name clause-ast)
-                                                                           (ast/line-number clause-ast)))
-                                                      (list expr-ast))])
-                                     (ast/call-expr (ast/sym (tagged-sym 'maybe
-                                                                         (ast/file-name clause-ast)
-                                                                         (ast/line-number clause-ast)))
-                                                    (list (ast/call-expr
-                                                           (ast/sym (tagged-sym 'zero
-                                                                                (ast/file-name clause-ast)
-                                                                                (ast/line-number clause-ast)))
-                                                           (list (ast/sym wrapper-sym)))))])))))))
+(defn expand-for-when [when-kw clause]
+  (and (= :when when-kw)
+       (maybe (list :when (fn [wrap-sym expr]
+                            (list (tagged-sym 'extract (ast/file-name expr) (ast/line-number expr))
+                                  (list (tagged-sym 'or (ast/file-name expr) (ast/line-number expr))
+                                        (list (tagged-sym 'and (ast/file-name expr) (ast/line-number expr))
+                                              clause (list (tagged-sym 'maybe (ast/file-name expr)
+                                                                       (ast/line-number expr))
+                                                           expr))
+                                        (list (tagged-sym 'maybe (ast/file-name expr) (ast/line-number expr))
+                                              (list (tagged-sym 'zero (ast/file-name expr) (ast/line-number expr))
+                                                    wrap-sym)))))))))
 
-(defn for-when-not [config binding value expr-ast wrapper-sym]
-  (and (= :when-not binding)
-       (map (analyze-expr config value)
-            (fn [clause-ast]
-              (ast/call-expr (ast/sym (tagged-sym 'extract
-                                                  (ast/file-name clause-ast)
-                                                  (ast/line-number clause-ast)))
-                             [(ast/or-expr
-                               [(ast/and-expr
-                                 [(ast/call-expr (ast/sym (tagged-sym '=*
-                                                                      (ast/file-name clause-ast)
-                                                                      (ast/line-number clause-ast)))
-                                                 (list (ast/sym 'nothing) clause-ast))
-                                  (ast/call-expr (ast/sym (tagged-sym 'maybe
-                                                                      (ast/file-name clause-ast)
-                                                                      (ast/line-number clause-ast)))
-                                                 (list expr-ast))])
-                                (ast/call-expr (ast/sym (tagged-sym 'maybe
-                                                                    (ast/file-name clause-ast)
-                                                                    (ast/line-number clause-ast)))
-                                               [(ast/call-expr (ast/sym (tagged-sym 'zero
-                                                                                    (ast/file-name clause-ast)
-                                                                                    (ast/line-number clause-ast)))
-                                                               (list (ast/sym wrapper-sym)))])])])))))
+(defn expand-for-when-not [when-not-kw clause]
+  (and (= :when-not when-not-kw)
+       (maybe (list :when-not (fn [wrap-sym expr]
+                                (list 'extract
+                                      (list 'or
+                                            (list 'and clause
+                                                  (list 'maybe (list 'zero wrap-sym)))
+                                            (list 'maybe expr))))))))
 
-(defn for-binding [config binding value expr-ast]
-  (map (analyze-expr config value)
-       (fn [value-ast]
-         (ast/call-expr (ast/sym (tagged-sym 'flat-map
-                                             (ast/file-name value-ast)
-                                             (ast/line-number value-ast)))
-                        (list value-ast
-                              (ast/fn-expr (ast/sym 'anon) [(ast/fn-arity (list binding) (list expr-ast))]))))))
+(defn expand-for-let [let-kw bindings]
+  (and (= :let let-kw)
+       (maybe (list :let (fn [_ expr]
+                           (list 'let bindings expr))))))
+
+(defn expand-for-bindings [[bound expr]]
+  (extract (or (expand-for-when bound expr)
+               (expand-for-when-not bound expr)
+               (expand-for-let bound expr)
+               (maybe (make-for-binding bound expr)))))
+
+(defn expand-for [bound val bindings body]
+  (let [wrap-sym (tagged-sym (gensym "wrapper_") (ast/file-name val) (ast/line-number val))
+        bindings (cons (make-for-binding bound wrap-sym)
+                       (map bindings expand-for-bindings))]
+    (list (tagged-sym 'let (ast/file-name val) (ast/line-number val))
+          (list (list wrap-sym val))
+          (reduce (reverse bindings)
+                  (list (tagged-sym 'wrap (ast/file-name body) (ast/line-number body))
+                        wrap-sym body)
+                  (fn [expr [binding value]]
+                    (value wrap-sym expr))))))
 
 (defn analyze-for [config expr]
-  (for [[_ bindings expr] (match expr List 'for)
-        [_ bound binding-expr & bindings] (match bindings List 'vector _ _)
-        wrapping-ast (analyze-expr config binding-expr)
-        expr-ast (analyze-expr config expr)
-        :let [wrap-sym (tagged-sym 'wrap (ast/file-name expr-ast) (ast/line-number expr-ast))
-              wrapper-sym (tagged-sym (gensym "wrapper_")
-                                      (ast/file-name wrapping-ast)
-                                      (ast/line-number wrapping-ast))
-              bindings (cons [bound wrapper-sym] (partition bindings 2))]
-        body-expr (reduce (reverse bindings)
-                          (maybe (ast/call-expr (ast/sym wrap-sym) (list (ast/sym wrapper-sym) expr-ast)))
-                          (fn [expr [binding value]]
-                            (flat-map expr
-                                      (fn [expr-ast]
-                                        (or (for-let config binding value expr-ast)
-                                            (for-when config binding value expr-ast wrapper-sym)
-                                            (for-when-not config binding value expr-ast wrapper-sym)
-                                            (for-binding config binding value expr-ast))))))]
-    (ast/let-expr [(ast/binding wrapper-sym wrapping-ast)] (list body-expr))))
+  (for [[_ bindings body] (match expr List 'for)
+        [[bound val] & bindings] (match bindings List _)
+        ast (analyze-expr config (expand-for bound val bindings body))]
+    ast))
 
 (defn analyze-expr [config expr]
   (or (analyze-literal-value expr)
