@@ -167,42 +167,80 @@
         [_ proto-specs] (analyze-extensions config proto-name defs)]
     (ast/reified (extract type-counter) proto-specs)))
 
-(defn tagged-sym [sym file-name line-num]
-  (grmr/tagged-symbol "" sym sym file-name line-num))
+;; (defn constructor-expr [new-type-name type-val-sym fields]
+;;   (let [fn (.file-name new-type-name)
+;;         ln (.line-num new-type-name)]
+;;     (list (tagged-sym 'def fn ln)
+;;           new-type-name
+;;           (list (tagged-sym 'reify fn ln)
+;;                 (tagged-sym 'Getter fn ln)
+;;                 (list (tagged-sym 'type-name fn ln)
+;;                       (list 'vector 'x)
+;;                       (str "*" new-type-name " constructor*"))
+;;                 (tagged-sym 'Stringable fn ln)
+;;                 (list (tagged-sym 'string-list fn ln)
+;;                       (list 'vector '_)
+;;                       (list 'list "<TypeCon " (str new-type-name) " ["
+;;                             (to-str (interpose fields ", ")) "]>"))
+;;                 (tagged-sym 'Container fn ln)
+;;                 (list (tagged-sym 'apply* fn ln)
+;;                       (list 'vector '_ 'args)
+;;                       (list 'apply 'invoke '_ 'args))
+;;                 (tagged-sym 'Function fn ln)
+;;                 (list (tagged-sym 'invoke fn ln)
+;;                       (list* 'vector '_ fields)
+;;                       (list 'new-type-value type-val-sym
+;;                             (cons 'vector fields))
+;;                       ;; (list 'print-err (str new-type-name))
+;;                       ;; (list 'abort)
+;;                       )
+;;                 (tagged-sym 'Type fn ln)
+;;                 ;; (list (tagged-sym 'make-value fn ln)
+;;                 ;;       (list* 'vector '_ fields)
+;;                 ;;       (list 'new-type-value type-val-sym
+;;                 ;;             (cons 'vector fields)))
+;;                 (list (tagged-sym 'instance? fn ln)
+;;                       (list 'vector 'x 'v)
+;;                       (list '=* (list 'get-type type-val-sym) '(get-type v)))))))
 
 (defn constructor-expr [new-type-name type-val-sym fields]
-  (let [fn (.file-name new-type-name)
-        ln (.line-num new-type-name)]
-    (list 'def new-type-name
-          (list 'reify
-                (tagged-sym 'Getter fn ln)
-                (list (tagged-sym 'type-name fn ln)
-                      (list 'vector 'x)
-                      (str "*" new-type-name " constructor*"))
-                (tagged-sym 'Stringable fn ln)
-                (list (tagged-sym 'string-list fn ln)
-                      (list 'vector '_)
-                      (list 'list "<TypeCon " (str new-type-name) " ["
-                            (to-str (interpose fields ", ")) "]>"))
-                (tagged-sym 'Type fn ln)
-                (list (tagged-sym 'instance? fn ln)
-                      (list 'vector 'x 'v)
-                      (list '=* (list 'get-type type-val-sym) '(get-type v)))
-                (tagged-sym 'Container fn ln)
-                (list (tagged-sym 'apply* fn ln)
-                      (list 'vector '_ 'args)
-                      (list 'apply 'invoke '_ 'args))
-                (tagged-sym 'Function fn ln)
-                (list (tagged-sym 'invoke fn ln)
-                      (list* 'vector '_ fields)
-                      (list 'new-type-value type-val-sym
-                            (cons 'vector fields)))))))
+  (grmr/tag (list 'def new-type-name
+                  (list 'reify
+                        'Getter
+                        (list 'type-name
+                              (list 'vector 'x)
+                              (str "*" new-type-name " constructor*"))
+                        'Stringable
+                        (list 'string-list
+                              (list 'vector '_)
+                              (list 'list
+                                    "<TypeCon " (str new-type-name) " ["
+                                    (to-str (interpose fields ", ")) "]>"))
+                        'Type
+                        (list 'instance?
+                              (list 'vector 'x 'v)
+                              (list '=*
+                                    (list 'get-type type-val-sym)
+                                    (list 'get-type 'v)))
+                        'Container
+                        (list 'apply*
+                              (list 'vector '_ 'args)
+                              (list 'apply 'invoke '_ 'args))
+                        'Function
+                        (list 'invoke
+                              (list* 'vector '_ fields)
+                              (list 'new-type-value type-val-sym
+                                    (cons 'vector fields)))))
+            (.file-name new-type-name)
+            (.line-num new-type-name)))
 
 (defn build-impls [fields impls]
   (or (and (empty? fields) (maybe impls))
       (every impls (fn [impl]
                      (or (for [[fn-name args expr & exprs] (match impl List _ _ _)
-                               :let [args-map (reduce args {}
+                               :let [fn (.file-name fn-name)
+                                     ln (.line-num fn-name)
+                                     args-map (reduce args {}
                                                       (fn [m arg]
                                                         (assoc m arg '_)))]
                                fields (every fields
@@ -210,38 +248,39 @@
                                                (or (get args-map fld)
                                                    (maybe fld))))
                                arg (second args)]
-                           (list fn-name args
-                                 (list* 'let (list (list (comp fields (list :dont-care))
-                                                         (list 'type-args arg)))
-                                        (cons expr exprs))))
+                           (grmr/tag (list fn-name args
+                                           (list* 'let (list (list (comp fields (list :dont-care))
+                                                                   (list 'type-args arg)))
+                                                  (cons expr exprs)))
+                                     fn ln))
                          (maybe impl))))))
 
 (defn impls-expr [impls-sym impls]
-  (let [fn (.file-name impls-sym)
-        ln (.line-num impls-sym)]
-    (list 'def impls-sym
-          (list*
-           'reify
-           (tagged-sym 'Eq fn ln)
-           (list (tagged-sym '=* fn ln)
-                 (list 'vector 'x 'y)
-                 '(and (=* (get-type x) (get-type y))
-                       (=* (type-args x) (type-args y))))
-           (tagged-sym 'Associative fn ln)
-           (list (tagged-sym 'get fn ln)
-                 (list 'vector 'x 'field)
-                 '(maybe (field x)))
-           (list (tagged-sym 'assoc fn ln)
-                 (list 'vector 'x 'field 'new-value)
-                 '(field x new-value))
-           impls))))
+  (grmr/tag (list 'def impls-sym
+                  (list*
+                   'reify
+                   'Eq
+                   (list '=*
+                         (list 'vector 'x 'y)
+                         '(and (=* (get-type x) (get-type y))
+                               (=* (type-args x) (type-args y))))
+                   'Associative
+                   (list 'get
+                         (list 'vector 'x 'field)
+                         '(maybe (field x)))
+                   (list 'assoc
+                         (list 'vector 'x 'field 'new-value)
+                         '(field x new-value))
+                   impls))
+            (.file-name impls-sym)
+            (.line-num impls-sym)))
 
-(defn create-getters [name fields fn ln]
-  (comp* (list (tagged-sym 'Getter fn ln)
-               (list (tagged-sym 'type-name fn ln) (list 'vector '_)
+(defn create-getters [name fields]
+  (comp* (list 'Getter
+               (list 'type-name (list 'vector '_)
                      (str name)))
          (for [field fields]
-           (let [getter-sym (tagged-sym (symbol (str "." field)) fn ln)]
+           (let [getter-sym (symbol (str "." field))]
              (list (list getter-sym (list 'vector 'x)
                          field)
                    (let [new-value (symbol (str "new-" field))]
@@ -255,8 +294,8 @@
         :let [fields (rest fields)
               fn (.file-name name)
               ln (.line-num name)
-              type-val-sym (tagged-sym (gensym "type-val-") fn ln)
-              field-getters (create-getters name fields fn ln)]
+              type-val-sym (grmr/tag (gensym "type-val-") fn ln)
+              field-getters (grmr/tag (create-getters name fields) fn ln)]
         constructor (analyze-expr config (constructor-expr name type-val-sym fields))
         impls (build-impls fields (comp field-getters defs))
         impls-ast (analyze-expr config (impls-expr type-val-sym impls))]
@@ -301,33 +340,28 @@
 
 (defn make-for-binding [binding value]
   (list :binding (fn [wrap-sym expr]
-                   (list (tagged-sym 'flat-map (ast/file-name value) (ast/line-number value))
-                         value
-                         (list 'fn 'anon
-                               (list (list 'fn-arity (list binding)
-                                           (list expr))))))))
+                   (grmr/tag (list 'flat-map value
+                                   (list 'fn 'anon
+                                         (list (list 'fn-arity (list binding)
+                                                     (list expr)))))
+                             (ast/file-name value) (ast/line-number value)))))
 
 (defn expand-for-when [when-kw clause]
   (and (= :when when-kw)
        (maybe (list :when (fn [wrap-sym expr]
-                            (list (tagged-sym 'extract (ast/file-name expr) (ast/line-number expr))
-                                  (list (tagged-sym 'or (ast/file-name expr) (ast/line-number expr))
-                                        (list (tagged-sym 'and (ast/file-name expr) (ast/line-number expr))
-                                              clause (list (tagged-sym 'maybe (ast/file-name expr)
-                                                                       (ast/line-number expr))
-                                                           expr))
-                                        (list (tagged-sym 'maybe (ast/file-name expr) (ast/line-number expr))
-                                              (list (tagged-sym 'zero (ast/file-name expr) (ast/line-number expr))
-                                                    wrap-sym)))))))))
+                            (grmr/tag (list 'extract
+                                            (list 'or (list 'and clause (list 'maybe expr))
+                                                  (list 'maybe (list 'zero wrap-sym))))
+                                      (ast/file-name expr) (ast/line-number expr)))))))
 
 (defn expand-for-when-not [when-not-kw clause]
   (and (= :when-not when-not-kw)
        (maybe (list :when-not (fn [wrap-sym expr]
-                                (list 'extract
-                                      (list 'or
-                                            (list 'and clause
-                                                  (list 'maybe (list 'zero wrap-sym)))
-                                            (list 'maybe expr))))))))
+                                (grmr/tag (list 'extract
+                                                (list 'or (list 'and clause
+                                                                (list 'maybe (list 'zero wrap-sym)))
+                                                      (list 'maybe expr)))
+                                      (ast/file-name expr) (ast/line-number expr)))))))
 
 (defn expand-for-let [let-kw bindings]
   (and (= :let let-kw)
@@ -341,13 +375,13 @@
                (maybe (make-for-binding bound expr)))))
 
 (defn expand-for [bound val bindings body]
-  (let [wrap-sym (tagged-sym (gensym "wrapper_") (ast/file-name val) (ast/line-number val))
+  (let [wrap-sym (grmr/tag (gensym "wrapper_") (ast/file-name val) (ast/line-number val))
         bindings (cons (make-for-binding bound wrap-sym)
                        (map bindings expand-for-bindings))]
-    (list (tagged-sym 'let (ast/file-name val) (ast/line-number val))
+    (list (grmr/tag 'let (ast/file-name val) (ast/line-number val))
           (list (list wrap-sym val))
           (reduce (reverse bindings)
-                  (list (tagged-sym 'wrap (ast/file-name body) (ast/line-number body))
+                  (list (grmr/tag 'wrap (ast/file-name body) (ast/line-number body))
                         wrap-sym body)
                   (fn [expr [binding value]]
                     (value wrap-sym expr))))))
