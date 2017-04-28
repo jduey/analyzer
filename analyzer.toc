@@ -222,10 +222,10 @@
                               (list '=*
                                     (list 'get-type type-val-sym)
                                     (list 'get-type 'v)))
-                        'Container
-                        (list 'apply*
-                              (list 'vector '_ 'args)
-                              (list 'apply 'invoke '_ 'args))
+                        (list 'make-value
+                              (list* 'vector '_ fields)
+                              (list 'new-type-value type-val-sym
+                                    (cons 'vector fields)))
                         'Function
                         (list 'invoke
                               (list* 'vector '_ fields)
@@ -238,9 +238,7 @@
   (or (and (empty? fields) (maybe impls))
       (every impls (fn [impl]
                      (or (for [[fn-name args expr & exprs] (match impl List _ _ _)
-                               :let [fn (.file-name fn-name)
-                                     ln (.line-num fn-name)
-                                     args-map (reduce args {}
+                               :let [args-map (reduce args {}
                                                       (fn [m arg]
                                                         (assoc m arg '_)))]
                                fields (every fields
@@ -248,32 +246,32 @@
                                                (or (get args-map fld)
                                                    (maybe fld))))
                                arg (second args)]
-                           (grmr/tag (list fn-name args
-                                           (list* 'let (list (list (comp fields (list :dont-care))
-                                                                   (list 'type-args arg)))
-                                                  (cons expr exprs)))
-                                     fn ln))
+                           (list fn-name args
+                                 (comp (grmr/tag (list 'let (list (list (comp fields (list :dont-care))
+                                                                        (list 'type-args arg))))
+                                                 (.file-name fn-name) (.line-num fn-name))
+                                       (cons expr exprs))))
                          (maybe impl))))))
 
 (defn impls-expr [impls-sym impls]
-  (grmr/tag (list 'def impls-sym
-                  (list*
-                   'reify
-                   'Eq
-                   (list '=*
-                         (list 'vector 'x 'y)
-                         '(and (=* (get-type x) (get-type y))
-                               (=* (type-args x) (type-args y))))
-                   'Associative
-                   (list 'get
-                         (list 'vector 'x 'field)
-                         '(maybe (field x)))
-                   (list 'assoc
-                         (list 'vector 'x 'field 'new-value)
-                         '(field x new-value))
-                   impls))
-            (.file-name impls-sym)
-            (.line-num impls-sym)))
+  (let [fn (.file-name impls-sym)
+        ln (.line-num impls-sym)]
+    (list (grmr/tag 'def fn ln) impls-sym
+          (comp (grmr/tag (list 'reify
+                                'Eq
+                                (list '=*
+                                      (list 'vector 'x 'y)
+                                      '(and (=* (get-type x) (get-type y))
+                                            (=* (type-args x) (type-args y))))
+                                'Associative
+                                (list 'get
+                                      (list 'vector 'x 'field)
+                                      '(maybe (field x)))
+                                (list 'assoc
+                                      (list 'vector 'x 'field 'new-value)
+                                      '(field x new-value)))
+                          fn ln)
+                impls))))
 
 (defn create-getters [name fields]
   (comp* (list 'Getter
@@ -281,6 +279,7 @@
                      (str name)))
          (for [field fields]
            (let [getter-sym (symbol (str "." field))]
+             ;; TODO: cannot use 'x here. 'field' might be 'x
              (list (list getter-sym (list 'vector 'x)
                          field)
                    (let [new-value (symbol (str "new-" field))]
@@ -299,7 +298,7 @@
         constructor (analyze-expr config (constructor-expr name type-val-sym fields))
         impls (build-impls fields (comp field-getters defs))
         impls-ast (analyze-expr config (impls-expr type-val-sym impls))]
-  (ast/type-expr name type-val-sym fields constructor impls-ast)))
+    (ast/type-expr name type-val-sym fields constructor impls-ast)))
 
 (defn analyze-module [expr]
   (map (match expr List 'module _)
@@ -388,7 +387,8 @@
 
 (defn analyze-for [config expr]
   (for [[_ bindings body] (match expr List 'for)
-        [[bound val] & bindings] (match bindings List _)
+        [first-pair & bindings] (match bindings List _)
+        :let [[bound val] first-pair]
         ast (analyze-expr config (expand-for bound val bindings body))]
     ast))
 
