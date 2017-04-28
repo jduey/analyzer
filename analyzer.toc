@@ -108,9 +108,10 @@
     (or (for [[_ quoted-value] (match quoted-list List 'quote _)
               ast (quote-literal quoted-value)]
           ast)
-        (for [[coll-builder & frms] (or (match quoted-list List 'hash-map _)
-                                        (match quoted-list List 'vector _))
-              contents (every frms quote-literal)]
+        (for [[coll-builder & frms] (or (match quoted-list List 'hash-map)
+                                        (match quoted-list List 'vector))
+              contents (or (empty? frms)
+                           (every frms quote-literal))]
           (ast/call-expr (ast/sym coll-builder) contents))
         (for [qs (every quoted-list quote-literal)]
           (ast/call-expr (ast/sym 'list) qs)))))
