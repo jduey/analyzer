@@ -64,6 +64,9 @@
 
 (defn analyze-fn-arity [config expr]
   (for [[_ args exprs] (match expr List 'fn-arity _ _)
+        :when-not (and (empty? exprs)
+                       (let [_ (print-err "Incomplete function definition. Body is empty.")]
+                         (abort)))
         body (traverse exprs maybe (partial analyze-expr config))]
     (ast/fn-arity args body)))
 
