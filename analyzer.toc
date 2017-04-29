@@ -283,11 +283,10 @@
                      (str name)))
          (for [field fields]
            (let [getter-sym (symbol (str "." field))]
-             ;; TODO: cannot use 'x here. 'field' might be 'x
-             (list (list getter-sym (list 'vector 'x)
+             (list (list getter-sym (list 'vector (symbol ".x"))
                          field)
                    (let [new-value (symbol (str "new-" field))]
-                     (list getter-sym (list 'vector 'x new-value)
+                     (list getter-sym (list 'vector (symbol ".x") new-value)
                            (list 'let
                                  (list (list field new-value))
                                  (cons name fields)))))))))
@@ -297,7 +296,7 @@
         :let [fields (rest fields)
               fn (.file-name name)
               ln (.line-num name)
-              type-val-sym (grmr/tag (gensym "type-val-") fn ln)
+              type-val-sym (grmr/tag (gensym ".type-val-") fn ln)
               field-getters (grmr/tag (create-getters name fields) fn ln)]
         constructor (analyze-expr config (constructor-expr name type-val-sym fields))
         impls (build-impls fields (comp field-getters defs))
