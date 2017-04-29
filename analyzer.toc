@@ -81,6 +81,10 @@
            (maybe (let [_ (print-err "Variadic args not allowed for protocol functions at "
                                      (.file-name fn-name) ": " (.line-num fn-name))]
                     (abort))))
+      (and (some params (partial instance? List))
+           (maybe (let [_ (print-err "Destructuring of arguments not allowed in prototype implementation functions"
+                                     (.file-name fn-name) ": " (.line-num fn-name))]
+                    (abort))))
       (or (for [_ (empty? default-body)]
             {fn-name {(dec (count params)) {}}})
           (for [ast (analyze-expr config (list 'fn-arity (rest params) default-body))]
