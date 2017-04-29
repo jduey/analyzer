@@ -399,6 +399,10 @@
         ast (analyze-expr config (expand-for bound val bindings body))]
     ast))
 
+(defn analyze-assert [config expr]
+  (for [[_ expr] (match expr List 'assert _)]
+    (ast/assertion expr)))
+
 (defn analyze-expr [config expr]
   (or (analyze-literal-value expr)
       (inline-C-expr expr)
@@ -414,6 +418,7 @@
       (analyze-main config expr)
       (analyze-def config expr)
       (analyze-extend-type config expr)
+      (analyze-assert config expr)
       (analyze-reify config expr)
       (analyze-let config expr)
       (analyze-call config expr)
